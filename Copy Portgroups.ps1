@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <#
 .SYNOPSIS
     Copie des Port Groups d'un vSwitch source vers un vSwitch cible entre deux hôtes ESXi.
@@ -33,10 +34,20 @@ function Get-ServerInfo {
     $password  = Read-Host "Entrez le mot de passe" -AsSecureString
     return @{
         IP         = $serverIP
+=======
+# Fonction pour demander les informations de connexion
+function Get-ServerInfo {
+    $serverIP = Read-Host "Entrez l'adresse IP ou le nom d'hôte du serveur ESXi"
+    $username = Read-Host "Entrez le nom d'utilisateur"
+    $password = Read-Host "Entrez le mot de passe" -AsSecureString
+    return @{
+        IP = $serverIP
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
         Credential = New-Object System.Management.Automation.PSCredential ($username, $password)
     }
 }
 
+<<<<<<< HEAD
 # ============================================================
 # CONNEXION AUX HÔTES ESXI
 # ============================================================
@@ -48,6 +59,17 @@ Write-Host "Informations pour le serveur ESXi cible :"
 $targetInfo = Get-ServerInfo
 
 # Toute erreur de connexion est fatale : on déconnecte les sessions ouvertes avant de sortir
+=======
+# Demander les informations pour le serveur source
+Write-Host "Informations pour le serveur ESXi source :"
+$sourceInfo = Get-ServerInfo
+
+# Demander les informations pour le serveur cible
+Write-Host "Informations pour le serveur ESXi cible :"
+$targetInfo = Get-ServerInfo
+
+# Connexion aux hôtes ESXi source et cible
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
 try {
     Connect-VIServer $sourceInfo.IP -Credential $sourceInfo.Credential -ErrorAction Stop
     Connect-VIServer $targetInfo.IP -Credential $targetInfo.Credential -ErrorAction Stop
@@ -58,17 +80,24 @@ catch {
     exit
 }
 
+<<<<<<< HEAD
 # ============================================================
 # SÉLECTION DU VSWITCH SOURCE
 # ============================================================
 
+=======
+# --- [SECTION SOURCE : Sélection vSwitch et Port Groups - Identique] ---
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
 $sourceVSwitches = Get-VirtualSwitch -VMHost $sourceInfo.IP
 Write-Host "`nvSwitch disponibles sur SOURCE ($($sourceInfo.IP)) :"
 for ($i = 0; $i -lt $sourceVSwitches.Count; $i++) {
     Write-Host "$($i+1). $($sourceVSwitches[$i].Name)"
 }
 
+<<<<<<< HEAD
 # Boucle jusqu'à saisie valide d'un index de vSwitch
+=======
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
 $vswitchIndex = $null
 while ($null -eq $vswitchIndex) {
     $userinput = Read-Host "Entrez le numéro du vSwitch source"
@@ -76,6 +105,7 @@ while ($null -eq $vswitchIndex) {
         $vswitchIndex = [int]$userinput - 1
     } else { Write-Host "Invalide." -ForegroundColor Yellow }
 }
+<<<<<<< HEAD
 
 $sourceVSwitchObj = $sourceVSwitches[$vswitchIndex]
 $vswitchName      = $sourceVSwitchObj.Name
@@ -84,12 +114,19 @@ $vswitchName      = $sourceVSwitchObj.Name
 # SÉLECTION DES PORT GROUPS SOURCE
 # ============================================================
 
+=======
+$sourceVSwitchObj = $sourceVSwitches[$vswitchIndex]
+$vswitchName = $sourceVSwitchObj.Name
+
+# Récupération des Port Groups
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
 $sourcePortGroups = $sourceVSwitchObj | Get-VirtualPortGroup
 Write-Host "Groupes de ports sur $vswitchName :"
 for ($i = 0; $i -lt $sourcePortGroups.Count; $i++) {
     Write-Host "$($i+1). $($sourcePortGroups[$i].Name) (VLAN: $($sourcePortGroups[$i].VLanId))"
 }
 
+<<<<<<< HEAD
 # Accepte une sélection mixte du type "1-5,7" (plages et numéros individuels)
 $selectedPortGroups = $null
 while (-not $selectedPortGroups) {
@@ -102,6 +139,17 @@ while (-not $selectedPortGroups) {
 
         if ($part -match '^(\d+)-(\d+)$') {
             # Traitement d'une plage (ex : 2-5)
+=======
+$selectedPortGroups = $null
+while (-not $selectedPortGroups) {
+    $selection = Read-Host "Entrez les numéros des groupes de ports à copier (ex: 1-5,7)"
+    $selectedIndices = @()
+    $valid = $true
+
+    foreach ($part in $selection.Split(',')) {
+        $part = $part.Trim()
+        if ($part -match '^(\d+)-(\d+)$') {
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
             $start = [int]$Matches[1]; $end = [int]$Matches[2]
             if ($start -gt $end) {
                 Write-Host "Plage invalide : '$part' (début > fin)." -ForegroundColor Yellow
@@ -112,16 +160,23 @@ while (-not $selectedPortGroups) {
                 $valid = $false; break
             }
             $selectedIndices += $start..$end
+<<<<<<< HEAD
 
         } elseif ($part -match '^\d+$') {
             # Traitement d'un numéro individuel
+=======
+        } elseif ($part -match '^\d+$') {
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
             $num = [int]$part
             if ($num -lt 1 -or $num -gt $sourcePortGroups.Count) {
                 Write-Host "Numéro hors limites : '$num' (max: $($sourcePortGroups.Count))." -ForegroundColor Yellow
                 $valid = $false; break
             }
             $selectedIndices += $num
+<<<<<<< HEAD
 
+=======
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
         } else {
             Write-Host "Valeur non reconnue : '$part'." -ForegroundColor Yellow
             $valid = $false; break
@@ -129,19 +184,28 @@ while (-not $selectedPortGroups) {
     }
 
     if ($valid -and $selectedIndices.Count -gt 0) {
+<<<<<<< HEAD
         # Dédoublonnage des indices avant de résoudre les objets Port Group
         $selectedIndices    = $selectedIndices | Sort-Object -Unique
         $selectedPortGroups = $sourcePortGroups | Where-Object {
             $selectedIndices -contains ([array]::IndexOf($sourcePortGroups, $_) + 1)
         }
+=======
+        $selectedIndices = $selectedIndices | Sort-Object -Unique
+        $selectedPortGroups = $sourcePortGroups | Where-Object { $selectedIndices -contains ([array]::IndexOf($sourcePortGroups, $_) + 1) }
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
     } elseif ($valid) {
         Write-Host "Aucun groupe sélectionné." -ForegroundColor Yellow
     }
 }
 
+<<<<<<< HEAD
 # ============================================================
 # CHOIX OU CRÉATION DU VSWITCH CIBLE
 # ============================================================
+=======
+# --- [NOUVELLE SECTION : CHOIX OU CRÉATION VSWITCH CIBLE] ---
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
 
 Write-Host "`n--- Configuration du vSwitch CIBLE ---" -ForegroundColor Cyan
 $targetVSwitches = Get-VirtualSwitch -VMHost $targetInfo.IP
@@ -154,15 +218,23 @@ $targetVswitchName = $null
 $choice = Read-Host "Choisissez un vSwitch existant ou '0' pour créer à l'identique"
 
 if ($choice -eq "0") {
+<<<<<<< HEAD
     # Garde-fou : si le vSwitch existe déjà sous le même nom, on le réutilise plutôt que d'échouer
+=======
+    # Vérifier si un vSwitch de ce nom existe déjà quand même
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
     $checkSwitch = Get-VirtualSwitch -VMHost $targetInfo.IP -Name $vswitchName -ErrorAction SilentlyContinue
     if ($checkSwitch) {
         Write-Host "Le vSwitch '$vswitchName' existe déjà sur la cible. Utilisation de l'existant." -ForegroundColor Yellow
         $targetVswitchName = $vswitchName
     } else {
         Write-Host "Création du vSwitch '$vswitchName' sur $($targetInfo.IP)..." -ForegroundColor Green
+<<<<<<< HEAD
         # MTU repris du vSwitch source pour garantir la cohérence réseau
         $newVSwitch        = New-VirtualSwitch -VMHost $targetInfo.IP -Name $vswitchName -Mtu $sourceVSwitchObj.Mtu
+=======
+        $newVSwitch = New-VirtualSwitch -VMHost $targetInfo.IP -Name $vswitchName -Mtu $sourceVSwitchObj.Mtu
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
         $targetVswitchName = $newVSwitch.Name
     }
 } else {
@@ -175,9 +247,13 @@ if ($choice -eq "0") {
     }
 }
 
+<<<<<<< HEAD
 # ============================================================
 # CONFIRMATION ET EXÉCUTION
 # ============================================================
+=======
+# --- [RÉSUMÉ ET EXÉCUTION] ---
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
 
 Write-Host "`nRésumé : Copie vers vSwitch '$targetVswitchName' sur $($targetInfo.IP)"
 $confirmation = Read-Host "Confirmer l'opération ? (O/N)"
@@ -187,12 +263,17 @@ $targetSwitch = Get-VirtualSwitch -VMHost $targetInfo.IP -Name $targetVswitchNam
 
 foreach ($pg in $selectedPortGroups) {
     $existingPg = Get-VirtualPortGroup -VirtualSwitch $targetSwitch -Name $pg.Name -ErrorAction SilentlyContinue
+<<<<<<< HEAD
 
+=======
+    
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
     if ($existingPg) {
         Write-Host "Le groupe $($pg.Name) existe déjà. Ignoré." -ForegroundColor Yellow
     } else {
         Write-Host "Création de $($pg.Name) (VLAN $($pg.VLanId))..."
         $newPg = New-VirtualPortGroup -VirtualSwitch $targetSwitch -Name $pg.Name -VLanId $pg.VLanId
+<<<<<<< HEAD
 
         # Réplication de la politique de sécurité (promiscuité, MAC spoofing, forged transmits)
         $sourcePolicy = $pg | Get-SecurityPolicy
@@ -200,8 +281,21 @@ foreach ($pg in $selectedPortGroups) {
             -AllowPromiscuous $sourcePolicy.AllowPromiscuous `
             -ForgedTransmits   $sourcePolicy.ForgedTransmits `
             -MacChanges        $sourcePolicy.MacChanges
+=======
+        
+        # Sécurité
+        $sourcePolicy = $pg | Get-SecurityPolicy
+        $newPg | Get-SecurityPolicy | Set-SecurityPolicy `
+            -AllowPromiscuous $sourcePolicy.AllowPromiscuous `
+            -ForgedTransmits $sourcePolicy.ForgedTransmits `
+            -MacChanges $sourcePolicy.MacChanges
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
     }
 }
 
 Write-Host "`nTerminé !"
+<<<<<<< HEAD
 Disconnect-VIServer -Server * -Confirm:$false
+=======
+Disconnect-VIServer -Server * -Confirm:$false
+>>>>>>> de1e87d70bd1227579e2812939a9e3a6cd14d273
