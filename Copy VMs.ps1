@@ -171,7 +171,6 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
     $nics        = Get-NetworkAdapter -VM $vm
     $controllers = Get-ScsiController -VM $vm
     $cdDrives    = Get-CDDrive -VM $vm
-    $floppies    = Get-FloppyDrive -VM $vm
 
     # Associe chaque disque au bus de son contrôleur SCSI, pour recréer le même type
     # de contrôleur (LSI Logic, LSI Logic SAS, ParaVirtual, BusLogic...) côté cible.
@@ -226,13 +225,6 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
         Write-Host "  (aucun)"
     }
 
-    Write-Host "Lecteurs disquette :"
-    if ($floppies) {
-        foreach ($fd in $floppies) { Write-Host "  - $($fd.Name)" }
-    } else {
-        Write-Host "  (aucun)"
-    }
-
     [pscustomobject]@{
         Specs              = $specs
         Disks              = $disks
@@ -240,7 +232,6 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
         Controllers        = $controllerSpecs
         DiskControllerBus  = $diskControllerBus
         CDDriveCount       = @($cdDrives).Count
-        FloppyDriveCount   = @($floppies).Count
     }
 }
 
@@ -316,7 +307,6 @@ $plan = foreach ($entry in $vmSpecs) {
         Controllers       = $entry.Controllers
         DiskControllerBus = $entry.DiskControllerBus
         CDDriveCount      = $entry.CDDriveCount
-        FloppyDriveCount  = $entry.FloppyDriveCount
     }
 }
 
@@ -417,20 +407,39 @@ foreach ($item in $plan) {
             }
         }
 
-        # Recréation des lecteurs CD/DVD et disquette (sans média, la source n'est pas copiée)
-        for ($i = 0; $i -lt $item.CDDriveCount; $i++) {
-            Write-Host "[$($item.TargetName)] Création du lecteur CD/DVD $($i + 1)..."
-            New-CDDrive -VM $newVM -NoMedia -Confirm:$false | Out-Null
-        }
-        for ($i = 0; $i -lt $item.FloppyDriveCount; $i++) {
-            Write-Host "[$($item.TargetName)] Création du lecteur disquette $($i + 1)..."
-            New-FloppyDrive -VM $newVM -NoMedia -Confirm:$false | Out-Null
+        # Recréation des lecteurs CD/DVD (sans média, la source n'est pas copiée).
+        # Un lecteur CD a besoin d'un contrôleur IDE ou SATA ; New-VM n'en crée pas
+        # forcément un par défaut selon le GuestId/la version matérielle, donc on
+        # ajoute un contrôleur SATA via l'API Vim si aucun des deux n'est présent.
+        if ($item.CDDriveCount -gt 0) {
+            $hasIdeOrSata = $newVM.ExtensionData.Config.Hardware.Device | Where-Object {
+                $_ -is [VMware.Vim.VirtualIDEController] -or $_ -is [VMware.Vim.VirtualAHCIController]
+            }
+            if (-not $hasIdeOrSata) {
+                Write-Host "[$($item.TargetName)] Ajout d'un contrôleur SATA (requis pour le lecteur CD/DVD)..."
+                $sataDeviceSpec = New-Object VMware.Vim.VirtualDeviceConfigSpec
+                $sataDeviceSpec.Operation = [VMware.Vim.VirtualDeviceConfigSpecOperation]::add
+                $sataController = New-Object VMware.Vim.VirtualAHCIController
+                $sataController.Key       = -1
+                $sataController.BusNumber = 0
+                $sataDeviceSpec.Device    = $sataController
+
+                $sataConfigSpec = New-Object VMware.Vim.VirtualMachineConfigSpec
+                $sataConfigSpec.DeviceChange = @($sataDeviceSpec)
+                $newVM.ExtensionData.ReconfigVM($sataConfigSpec)
+            }
+
+            for ($i = 0; $i -lt $item.CDDriveCount; $i++) {
+                Write-Host "[$($item.TargetName)] Création du lecteur CD/DVD $($i + 1)..."
+                New-CDDrive -VM $newVM -StartConnected:$false -Confirm:$false | Out-Null
+            }
         }
 
         Write-Host "VM '$($item.TargetName)' créée avec succès sur $($targetInfo.IP)." -ForegroundColor Green
     }
     catch {
-        Write-Host "Erreur lors de la création de '$($item.TargetName)' : $_" -ForegroundColor Red
+        Write-Host "Erreur lors de la création de '$($item.TargetName)' : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  (ligne $($_.InvocationInfo.ScriptLineNumber) : $($_.InvocationInfo.Line.Trim()))" -ForegroundColor Red
     }
 }
 
