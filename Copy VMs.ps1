@@ -363,8 +363,8 @@ foreach ($item in $plan) {
         $newVM.ExtensionData.ReconfigVM($configSpec)
 
         # Réservations / limites / shares CPU et mémoire
+        # (Set-VMResourceConfiguration reçoit la VM par le pipeline, pas via -VM)
         $resourceParams = @{
-            VM             = $newVM
             CpuReservationMhz = $item.Specs.CpuReservationMhz
             CpuLimitMhz       = $item.Specs.CpuLimitMhz
             CpuSharesLevel    = $item.Specs.CpuSharesLevel
@@ -375,7 +375,7 @@ foreach ($item in $plan) {
         }
         if ($item.Specs.CpuSharesLevel -eq 'Custom') { $resourceParams.NumCpuShares = $item.Specs.NumCpuShares }
         if ($item.Specs.MemSharesLevel -eq 'Custom') { $resourceParams.NumMemShares = $item.Specs.NumMemShares }
-        Set-VMResourceConfiguration @resourceParams | Out-Null
+        $newVM | Set-VMResourceConfiguration @resourceParams | Out-Null
 
         # New-VM ajoute un disque, un contrôleur SCSI et une carte réseau par défaut
         # (dimensionnés/typés selon le GuestId) même sans -DiskGB/-NetworkName :
