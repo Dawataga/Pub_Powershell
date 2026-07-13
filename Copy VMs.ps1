@@ -270,6 +270,11 @@ foreach ($item in $plan) {
         $configSpec.Firmware = $item.Specs.Firmware
         $newVM.ExtensionData.ReconfigVM($configSpec)
 
+        # New-VM ajoute un disque et une carte réseau par défaut (dimensionnés selon le GuestId)
+        # même sans -DiskGB/-NetworkName : on les retire avant de recréer ceux de la source.
+        Get-HardDisk -VM $newVM | Remove-HardDisk -DeletePermanently:$true -Confirm:$false
+        Get-NetworkAdapter -VM $newVM | Remove-NetworkAdapter -Confirm:$false
+
         # Recréation des disques (vides, sans les données source)
         foreach ($disk in $item.Disks) {
             Write-Host "[$($item.TargetName)] Création du disque $($disk.CapacityGB) Go (format $($disk.StorageFormat))..."
