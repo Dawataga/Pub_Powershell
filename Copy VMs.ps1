@@ -167,8 +167,26 @@ if ($poweredOnVMs) {
 # ============================================================
 
 $vmSpecs = foreach ($vm in $selectedVMs) {
-    $disks = Get-HardDisk -VM $vm
-    $nics  = Get-NetworkAdapter -VM $vm
+    $disks       = Get-HardDisk -VM $vm
+    $nics        = Get-NetworkAdapter -VM $vm
+    $controllers = Get-ScsiController -VM $vm
+    $cdDrives    = Get-CDDrive -VM $vm
+    $floppies    = Get-FloppyDrive -VM $vm
+
+    # Associe chaque disque au bus de son contrôleur SCSI, pour recréer le même type
+    # de contrôleur (LSI Logic, LSI Logic SAS, ParaVirtual, BusLogic...) côté cible.
+    $controllerByKey = @{}
+    foreach ($ctrl in $controllers) { $controllerByKey[$ctrl.ExtensionData.Key] = $ctrl }
+
+    $controllerSpecs = $controllers | ForEach-Object {
+        [pscustomobject]@{ BusNumber = $_.ExtensionData.BusNumber; Type = $_.Type }
+    }
+
+    $diskControllerBus = @{}
+    foreach ($disk in $disks) {
+        $ctrl = $controllerByKey[$disk.ExtensionData.ControllerKey]
+        $diskControllerBus[$disk.Id] = $ctrl.ExtensionData.BusNumber
+    }
 
     $specs = [ordered]@{
         Name           = $vm.Name
@@ -184,9 +202,14 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
     Write-Host "`n--- Spécifications relevées sur $($vm.Name) ---" -ForegroundColor Cyan
     $specs.GetEnumerator() | ForEach-Object { Write-Host "$($_.Key) : $($_.Value)" }
 
+    Write-Host "Contrôleurs SCSI :"
+    foreach ($ctrl in $controllerSpecs) {
+        Write-Host "  - Bus $($ctrl.BusNumber) : $($ctrl.Type)"
+    }
+
     Write-Host "Disques :"
     foreach ($disk in $disks) {
-        Write-Host "  - $($disk.Name) : $($disk.CapacityGB) Go, format $($disk.StorageFormat)"
+        Write-Host "  - $($disk.Name) : $($disk.CapacityGB) Go, format $($disk.StorageFormat), bus SCSI $($diskControllerBus[$disk.Id])"
     }
 
     Write-Host "Cartes réseau :"
@@ -194,7 +217,29 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
         Write-Host "  - $($nic.Name) : $($nic.NetworkName), type $($nic.Type)"
     }
 
-    [pscustomobject]@{ Specs = $specs; Disks = $disks; Nics = $nics }
+    Write-Host "Lecteurs CD/DVD :"
+    if ($cdDrives) {
+        foreach ($cd in $cdDrives) { Write-Host "  - $($cd.Name)" }
+    } else {
+        Write-Host "  (aucun)"
+    }
+
+    Write-Host "Lecteurs disquette :"
+    if ($floppies) {
+        foreach ($fd in $floppies) { Write-Host "  - $($fd.Name)" }
+    } else {
+        Write-Host "  (aucun)"
+    }
+
+    [pscustomobject]@{
+        Specs              = $specs
+        Disks              = $disks
+        Nics               = $nics
+        Controllers        = $controllerSpecs
+        DiskControllerBus  = $diskControllerBus
+        CDDriveCount       = @($cdDrives).Count
+        FloppyDriveCount   = @($floppies).Count
+    }
 }
 
 # ============================================================
@@ -261,11 +306,15 @@ $plan = foreach ($entry in $vmSpecs) {
     }
 
     [pscustomobject]@{
-        TargetName = $targetName
-        Specs      = $entry.Specs
-        Disks      = $entry.Disks
-        Nics       = $entry.Nics
-        NetworkMap = $networkMap
+        TargetName        = $targetName
+        Specs             = $entry.Specs
+        Disks             = $entry.Disks
+        Nics              = $entry.Nics
+        NetworkMap        = $networkMap
+        Controllers       = $entry.Controllers
+        DiskControllerBus = $entry.DiskControllerBus
+        CDDriveCount      = $entry.CDDriveCount
+        FloppyDriveCount  = $entry.FloppyDriveCount
     }
 }
 
@@ -298,15 +347,36 @@ foreach ($item in $plan) {
         $configSpec.Firmware = $item.Specs.Firmware
         $newVM.ExtensionData.ReconfigVM($configSpec)
 
-        # New-VM ajoute un disque et une carte réseau par défaut (dimensionnés selon le GuestId)
-        # même sans -DiskGB/-NetworkName : on les retire avant de recréer ceux de la source.
+        # New-VM ajoute un disque, un contrôleur SCSI et une carte réseau par défaut
+        # (dimensionnés/typés selon le GuestId) même sans -DiskGB/-NetworkName :
+        # on retire disque et carte réseau avant de recréer ceux de la source.
         Get-HardDisk -VM $newVM | Remove-HardDisk -DeletePermanently:$true -Confirm:$false
         Get-NetworkAdapter -VM $newVM | Remove-NetworkAdapter -Confirm:$false
 
-        # Recréation des disques (vides, sans les données source)
+        # Prépare les contrôleurs SCSI cible avec le même type que sur la source
+        # (le contrôleur par défaut du bus 0 est réutilisé et retypé si besoin).
+        $targetControllers = Get-ScsiController -VM $newVM
+        $busControllerMap  = @{}
+        foreach ($ctrlSpec in $item.Controllers) {
+            $existing = $targetControllers | Where-Object { $_.ExtensionData.BusNumber -eq $ctrlSpec.BusNumber }
+            if ($existing) {
+                if ($existing.Type -ne $ctrlSpec.Type) {
+                    Write-Host "[$($item.TargetName)] Contrôleur SCSI bus $($ctrlSpec.BusNumber) : $($existing.Type) -> $($ctrlSpec.Type)"
+                    $existing = Set-ScsiController -ScsiController $existing -Type $ctrlSpec.Type -Confirm:$false
+                }
+                $busControllerMap[$ctrlSpec.BusNumber] = $existing
+            } else {
+                Write-Host "[$($item.TargetName)] Création du contrôleur SCSI bus $($ctrlSpec.BusNumber) ($($ctrlSpec.Type))..."
+                $busControllerMap[$ctrlSpec.BusNumber] = New-ScsiController -VM $newVM -Type $ctrlSpec.Type -Confirm:$false
+            }
+        }
+
+        # Recréation des disques (vides, sans les données source), sur le bon contrôleur
         foreach ($disk in $item.Disks) {
-            Write-Host "[$($item.TargetName)] Création du disque $($disk.CapacityGB) Go (format $($disk.StorageFormat))..."
-            New-HardDisk -VM $newVM -CapacityGB $disk.CapacityGB -StorageFormat $disk.StorageFormat -Datastore $targetDatastore -Confirm:$false | Out-Null
+            $busNumber  = $item.DiskControllerBus[$disk.Id]
+            $controller = $busControllerMap[$busNumber]
+            Write-Host "[$($item.TargetName)] Création du disque $($disk.CapacityGB) Go (format $($disk.StorageFormat), contrôleur $($controller.Type) bus $busNumber)..."
+            New-HardDisk -VM $newVM -CapacityGB $disk.CapacityGB -StorageFormat $disk.StorageFormat -Datastore $targetDatastore -Controller $controller -Confirm:$false | Out-Null
         }
 
         # Recréation des cartes réseau selon la correspondance établie plus haut
@@ -318,6 +388,16 @@ foreach ($item in $plan) {
             } else {
                 Write-Host "[$($item.TargetName)] Carte réseau $($nic.Name) ignorée (aucune correspondance choisie)." -ForegroundColor Yellow
             }
+        }
+
+        # Recréation des lecteurs CD/DVD et disquette (sans média, la source n'est pas copiée)
+        for ($i = 0; $i -lt $item.CDDriveCount; $i++) {
+            Write-Host "[$($item.TargetName)] Création du lecteur CD/DVD $($i + 1)..."
+            New-CDDrive -VM $newVM -NoMedia -Confirm:$false | Out-Null
+        }
+        for ($i = 0; $i -lt $item.FloppyDriveCount; $i++) {
+            Write-Host "[$($item.TargetName)] Création du lecteur disquette $($i + 1)..."
+            New-FloppyDrive -VM $newVM -NoMedia -Confirm:$false | Out-Null
         }
 
         Write-Host "VM '$($item.TargetName)' créée avec succès sur $($targetInfo.IP)." -ForegroundColor Green
