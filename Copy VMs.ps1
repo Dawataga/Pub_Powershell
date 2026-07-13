@@ -51,6 +51,17 @@ function Select-FromList {
     return $Items[$index]
 }
 
+# Demande une confirmation O/N ; reboucle si la saisie est vide ou ni O ni N
+function Confirm-Action {
+    param([string]$Prompt)
+    while ($true) {
+        $response = Read-Host "$Prompt (O/N)"
+        if ($response -match '^[Oo]$') { return $true }
+        if ($response -match '^[Nn]$') { return $false }
+        Write-Host "Réponse invalide, entrez O ou N." -ForegroundColor Yellow
+    }
+}
+
 # Sélection multiple dans une liste numérotée, accepte le format "1-3,5"
 function Select-MultipleFromList {
     param($Items, [string]$Prompt)
@@ -144,8 +155,7 @@ if ($poweredOnVMs) {
     foreach ($vm in $poweredOnVMs) {
         Write-Host "  - $($vm.Name) : $($vm.NumCpu) vCPU ($($vm.CoresPerSocket) cores/socket), $($vm.MemoryGB) Go RAM" -ForegroundColor Yellow
     }
-    $confirmPoweredOn = Read-Host "Continuer avec ces VMs allumées ? (O/N)"
-    if ($confirmPoweredOn -notmatch '^[Oo]$') {
+    if (-not (Confirm-Action "Continuer avec ces VMs allumées ?")) {
         Write-Host "Opération annulée." -ForegroundColor Red
         Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue
         exit
@@ -265,8 +275,7 @@ $plan = foreach ($entry in $vmSpecs) {
 
 Write-Host "`nRésumé : création de $($plan.Count) VM(s) sur $($targetInfo.IP) / $($targetDatastore.Name) :"
 foreach ($item in $plan) { Write-Host "  - $($item.Specs.Name) -> $($item.TargetName)" }
-$confirmation = Read-Host "Confirmer l'opération ? (O/N)"
-if ($confirmation -notmatch '^[Oo]$') { Disconnect-VIServer -Server * -Confirm:$false ; exit }
+if (-not (Confirm-Action "Confirmer l'opération ?")) { Disconnect-VIServer -Server * -Confirm:$false ; exit }
 
 foreach ($item in $plan) {
     try {
