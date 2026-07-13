@@ -355,14 +355,17 @@ foreach ($item in $plan) {
         $availableTargetControllers = @(Get-ScsiController -VM $newVM)
         $busControllerMap = @{}
 
-        $disksByBus = [ordered]@{}
+        # Hashtable classique (pas [ordered]) : un OrderedDictionary a un indexeur par
+        # position en plus de celui par clé, ce qui provoque une erreur "index" dès que
+        # la clé est un entier (le bus SCSI) ne correspondant à aucune position existante.
+        $disksByBus = @{}
         foreach ($disk in $item.Disks) {
             $busNumber = $item.DiskControllerBus[$disk.Id]
             if (-not $disksByBus.Contains($busNumber)) { $disksByBus[$busNumber] = @() }
             $disksByBus[$busNumber] += $disk
         }
 
-        foreach ($busNumber in $disksByBus.Keys) {
+        foreach ($busNumber in ($disksByBus.Keys | Sort-Object)) {
             $ctrlSpec  = $item.Controllers | Where-Object { $_.BusNumber -eq $busNumber } | Select-Object -First 1
             $isFirst   = $true
 
