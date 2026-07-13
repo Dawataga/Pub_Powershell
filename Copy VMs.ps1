@@ -135,6 +135,22 @@ for ($i = 0; $i -lt $sourceVMs.Count; $i++) {
 }
 $selectedVMs = Select-MultipleFromList -Items $sourceVMs -Prompt "Entrez les numéros des VMs à recréer (ex: 1-3,5)"
 
+# Avertit si une VM sélectionnée est allumée : les specs lues à chaud (hot-add,
+# changements non commités côté config) peuvent ne pas refléter exactement la réalité.
+$poweredOnVMs = $selectedVMs | Where-Object { $_.PowerState -eq 'PoweredOn' }
+if ($poweredOnVMs) {
+    Write-Host "`nATTENTION : les VMs suivantes sont allumées. Les caractéristiques relevées peuvent ne pas être exactes (valeurs à chaud, hot-add, etc.) :" -ForegroundColor Yellow
+    foreach ($vm in $poweredOnVMs) {
+        Write-Host "  - $($vm.Name) : $($vm.NumCpu) vCPU ($($vm.CoresPerSocket) cores/socket), $($vm.MemoryGB) Go RAM" -ForegroundColor Yellow
+    }
+    $confirmPoweredOn = Read-Host "Continuer avec ces VMs allumées ? (O/N)"
+    if ($confirmPoweredOn -notmatch '^[Oo]$') {
+        Write-Host "Opération annulée." -ForegroundColor Red
+        Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue
+        exit
+    }
+}
+
 # ============================================================
 # LECTURE DES SPÉCIFICATIONS DES VMS SOURCE
 # ============================================================
