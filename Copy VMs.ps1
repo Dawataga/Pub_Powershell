@@ -149,7 +149,7 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
         CoresPerSocket = $vm.CoresPerSocket
         MemoryGB       = $vm.MemoryGB
         GuestId        = $vm.ExtensionData.Config.GuestId
-        HWVersion      = $vm.Version
+        HWVersion      = $vm.HardwareVersion
         Firmware       = $vm.ExtensionData.Config.Firmware
         Notes          = $vm.Notes
     }
