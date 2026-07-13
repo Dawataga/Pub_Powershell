@@ -7,6 +7,7 @@
     une ou plusieurs VMs source, lit leurs caractéristiques (CPU, mémoire, disques, cartes réseau,
     firmware, version matérielle, OS invité, notes) puis crée pour chacune une nouvelle VM vide
     sur l'hôte cible avec la même configuration (même enveloppe, sans les données).
+    Ecrit en tout ou partie avec Claude Code
 
 .NOTES
     Prérequis : Module VMware.PowerCLI ou VCF.PowerCLI installé.
@@ -213,11 +214,13 @@ $targetPortGroups = Get-VirtualPortGroup -VMHost $targetVMHost
 $networkCache = @{}   # Réutilisé entre VMs pour ne pas reposer la même question deux fois
 $plan = foreach ($entry in $vmSpecs) {
     $baseName   = $entry.Specs.Name
-    $targetName = $baseName
-    if (Get-VM -Server $targetConn -Name $targetName -ErrorAction SilentlyContinue) {
+    $targetName = Read-Host "Nom de la VM cible pour '$baseName' (Entrée pour garder ce nom)"
+    if ([string]::IsNullOrWhiteSpace($targetName)) { $targetName = $baseName }
+
+    while (Get-VM -Server $targetConn -Name $targetName -ErrorAction SilentlyContinue) {
         do {
             $targetName = Read-Host "Une VM '$targetName' existe déjà sur la cible. Nouveau nom pour '$baseName'"
-        } while ([string]::IsNullOrWhiteSpace($targetName) -or (Get-VM -Server $targetConn -Name $targetName -ErrorAction SilentlyContinue))
+        } while ([string]::IsNullOrWhiteSpace($targetName))
     }
 
     $networkMap = @{}
