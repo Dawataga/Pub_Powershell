@@ -358,30 +358,52 @@ foreach ($item in $plan) {
         Get-HardDisk -VM $newVM | Remove-HardDisk -DeletePermanently:$true -Confirm:$false
         Get-NetworkAdapter -VM $newVM | Remove-NetworkAdapter -Confirm:$false
 
-        # Prépare les contrôleurs SCSI cible avec le même type que sur la source
-        # (le contrôleur par défaut du bus 0 est réutilisé et retypé si besoin).
-        $targetControllers = Get-ScsiController -VM $newVM
-        $busControllerMap  = @{}
-        foreach ($ctrlSpec in $item.Controllers) {
-            $existing = $targetControllers | Where-Object { $_.ExtensionData.BusNumber -eq $ctrlSpec.BusNumber }
-            if ($existing) {
-                if ($existing.Type -ne $ctrlSpec.Type) {
-                    Write-Host "[$($item.TargetName)] Contrôleur SCSI bus $($ctrlSpec.BusNumber) : $($existing.Type) -> $($ctrlSpec.Type)"
-                    $existing = Set-ScsiController -ScsiController $existing -Type $ctrlSpec.Type -Confirm:$false
-                }
-                $busControllerMap[$ctrlSpec.BusNumber] = $existing
-            } else {
-                Write-Host "[$($item.TargetName)] Création du contrôleur SCSI bus $($ctrlSpec.BusNumber) ($($ctrlSpec.Type))..."
-                $busControllerMap[$ctrlSpec.BusNumber] = New-ScsiController -VM $newVM -Type $ctrlSpec.Type -Confirm:$false
-            }
+        # Recréation des disques (vides, sans les données source), regroupés par bus
+        # SCSI source pour recréer le bon type de contrôleur. New-ScsiController n'a
+        # pas de paramètre -VM : il faut lui passer un disque existant, donc on ne
+        # traite que les bus réellement utilisés par au moins un disque.
+        $availableTargetControllers = @(Get-ScsiController -VM $newVM)
+        $busControllerMap = @{}
+
+        $disksByBus = [ordered]@{}
+        foreach ($disk in $item.Disks) {
+            $busNumber = $item.DiskControllerBus[$disk.Id]
+            if (-not $disksByBus.Contains($busNumber)) { $disksByBus[$busNumber] = @() }
+            $disksByBus[$busNumber] += $disk
         }
 
-        # Recréation des disques (vides, sans les données source), sur le bon contrôleur
-        foreach ($disk in $item.Disks) {
-            $busNumber  = $item.DiskControllerBus[$disk.Id]
-            $controller = $busControllerMap[$busNumber]
-            Write-Host "[$($item.TargetName)] Création du disque $($disk.CapacityGB) Go (format $($disk.StorageFormat), contrôleur $($controller.Type) bus $busNumber)..."
-            New-HardDisk -VM $newVM -CapacityGB $disk.CapacityGB -StorageFormat $disk.StorageFormat -Datastore $targetDatastore -Controller $controller -Confirm:$false | Out-Null
+        foreach ($busNumber in $disksByBus.Keys) {
+            $ctrlSpec  = $item.Controllers | Where-Object { $_.BusNumber -eq $busNumber } | Select-Object -First 1
+            $isFirst   = $true
+
+            foreach ($disk in $disksByBus[$busNumber]) {
+                if ($isFirst) {
+                    if ($availableTargetControllers.Count -gt 0) {
+                        # Réutilise un contrôleur existant (ex: celui créé par défaut par New-VM)
+                        $controller = $availableTargetControllers[0]
+                        $availableTargetControllers = @($availableTargetControllers | Select-Object -Skip 1)
+                        if ($controller.Type -ne $ctrlSpec.Type) {
+                            Write-Host "[$($item.TargetName)] Contrôleur SCSI : $($controller.Type) -> $($ctrlSpec.Type)"
+                            $controller = Set-ScsiController -ScsiController $controller -Type $ctrlSpec.Type -Confirm:$false
+                        }
+                        Write-Host "[$($item.TargetName)] Création du disque $($disk.CapacityGB) Go (format $($disk.StorageFormat), contrôleur $($ctrlSpec.Type))..."
+                        New-HardDisk -VM $newVM -CapacityGB $disk.CapacityGB -StorageFormat $disk.StorageFormat -Datastore $targetDatastore -Controller $controller -Confirm:$false | Out-Null
+                    } else {
+                        # Plus de contrôleur disponible : on crée le disque puis un nouveau
+                        # contrôleur à partir de ce disque (New-ScsiController -HardDisk).
+                        Write-Host "[$($item.TargetName)] Création du disque $($disk.CapacityGB) Go (format $($disk.StorageFormat))..."
+                        $newDisk = New-HardDisk -VM $newVM -CapacityGB $disk.CapacityGB -StorageFormat $disk.StorageFormat -Datastore $targetDatastore -Confirm:$false
+                        Write-Host "[$($item.TargetName)] Création du contrôleur SCSI ($($ctrlSpec.Type))..."
+                        $controller = New-ScsiController -HardDisk $newDisk -Type $ctrlSpec.Type -Confirm:$false
+                    }
+                    $busControllerMap[$busNumber] = $controller
+                    $isFirst = $false
+                } else {
+                    $controller = $busControllerMap[$busNumber]
+                    Write-Host "[$($item.TargetName)] Création du disque $($disk.CapacityGB) Go (format $($disk.StorageFormat), contrôleur $($ctrlSpec.Type))..."
+                    New-HardDisk -VM $newVM -CapacityGB $disk.CapacityGB -StorageFormat $disk.StorageFormat -Datastore $targetDatastore -Controller $controller -Confirm:$false | Out-Null
+                }
+            }
         }
 
         # Recréation des cartes réseau selon la correspondance établie plus haut
