@@ -62,6 +62,63 @@ function Confirm-Action {
     }
 }
 
+# Retourne le contrôleur SATA existant d'une VM, ou en crée un via l'API Vim
+# (New-VM n'a pas d'équivalent PowerCLI pour créer un contrôleur SATA seul).
+function Get-OrNewSataController {
+    param($VM)
+    $existing = $VM.ExtensionData.Config.Hardware.Device | Where-Object { $_ -is [VMware.Vim.VirtualAHCIController] } | Select-Object -First 1
+    if ($existing) { return $existing }
+
+    $deviceSpec = New-Object VMware.Vim.VirtualDeviceConfigSpec
+    $deviceSpec.Operation = [VMware.Vim.VirtualDeviceConfigSpecOperation]::add
+    $controller = New-Object VMware.Vim.VirtualAHCIController
+    $controller.Key       = -1
+    $controller.BusNumber = 0
+    $deviceSpec.Device    = $controller
+
+    $configSpec = New-Object VMware.Vim.VirtualMachineConfigSpec
+    $configSpec.DeviceChange = @($deviceSpec)
+    $VM.ExtensionData.ReconfigVM($configSpec)
+    $VM.ExtensionData.UpdateViewData()
+
+    return ($VM.ExtensionData.Config.Hardware.Device | Where-Object { $_ -is [VMware.Vim.VirtualAHCIController] } | Select-Object -First 1)
+}
+
+# Crée un disque directement via l'API Vim, attaché à un contrôleur donné (clé de
+# périphérique). Utilisé pour les disques SATA : New-HardDisk -Controller n'accepte
+# qu'un contrôleur SCSI typé PowerCLI, pas un contrôleur SATA.
+function New-VimHardDisk {
+    param($VM, [int]$ControllerKey, [double]$CapacityGB, [string]$StorageFormat, $Datastore)
+
+    $usedUnits = @($VM.ExtensionData.Config.Hardware.Device |
+        Where-Object { $_.ControllerKey -eq $ControllerKey } |
+        ForEach-Object { $_.UnitNumber })
+    $unitNumber = 0
+    while ($usedUnits -contains $unitNumber) { $unitNumber++ }
+
+    $backing = New-Object VMware.Vim.VirtualDiskFlatVer2BackingInfo
+    $backing.DiskMode        = 'persistent'
+    $backing.ThinProvisioned = ($StorageFormat -eq 'Thin')
+    $backing.EagerlyScrub    = ($StorageFormat -eq 'EagerZeroedThick')
+    $backing.FileName        = "[$($Datastore.Name)]"
+
+    $disk = New-Object VMware.Vim.VirtualDisk
+    $disk.ControllerKey = $ControllerKey
+    $disk.UnitNumber    = $unitNumber
+    $disk.Key           = -100
+    $disk.CapacityInKB  = [long]($CapacityGB * 1MB)
+    $disk.Backing       = $backing
+
+    $deviceSpec = New-Object VMware.Vim.VirtualDeviceConfigSpec
+    $deviceSpec.Operation     = [VMware.Vim.VirtualDeviceConfigSpecOperation]::add
+    $deviceSpec.FileOperation = [VMware.Vim.VirtualDeviceConfigSpecFileOperation]::create
+    $deviceSpec.Device        = $disk
+
+    $configSpec = New-Object VMware.Vim.VirtualMachineConfigSpec
+    $configSpec.DeviceChange = @($deviceSpec)
+    $VM.ExtensionData.ReconfigVM($configSpec)
+}
+
 # Sélection multiple dans une liste numérotée, accepte le format "1-3,5"
 function Select-MultipleFromList {
     param($Items, [string]$Prompt)
@@ -167,25 +224,39 @@ if ($poweredOnVMs) {
 # ============================================================
 
 $vmSpecs = foreach ($vm in $selectedVMs) {
-    $disks       = Get-HardDisk -VM $vm
-    $nics        = Get-NetworkAdapter -VM $vm
-    $controllers = Get-ScsiController -VM $vm
-    $cdDrives    = Get-CDDrive -VM $vm
+    $disks           = Get-HardDisk -VM $vm
+    $nics            = Get-NetworkAdapter -VM $vm
+    $scsiControllers = Get-ScsiController -VM $vm
+    $cdDrives        = Get-CDDrive -VM $vm
+    $allDevices      = $vm.ExtensionData.Config.Hardware.Device
+    $sataControllers = $allDevices | Where-Object { $_ -is [VMware.Vim.VirtualAHCIController] }
+    $usbControllers  = $allDevices | Where-Object { $_ -is [VMware.Vim.VirtualUSBController] -or $_ -is [VMware.Vim.VirtualUSBXHCIController] }
+    $usbDevices      = Get-UsbDevice -VM $vm
 
-    # Associe chaque disque au bus de son contrôleur SCSI, pour recréer le même type
-    # de contrôleur (LSI Logic, LSI Logic SAS, ParaVirtual, BusLogic...) côté cible.
+    # Associe chaque disque à son contrôleur (SCSI ou SATA), pour recréer le même
+    # type/bus côté cible (LSI Logic, LSI Logic SAS, ParaVirtual, BusLogic, SATA...).
     $controllerByKey = @{}
-    foreach ($ctrl in $controllers) { $controllerByKey[$ctrl.ExtensionData.Key] = $ctrl }
-
-    $controllerSpecs = $controllers | ForEach-Object {
-        [pscustomobject]@{ BusNumber = $_.ExtensionData.BusNumber; Type = $_.Type }
+    foreach ($ctrl in $scsiControllers) {
+        $controllerByKey[$ctrl.ExtensionData.Key] = [pscustomobject]@{ Kind = 'Scsi'; BusNumber = $ctrl.ExtensionData.BusNumber; Type = $ctrl.Type }
+    }
+    foreach ($ctrl in $sataControllers) {
+        $controllerByKey[$ctrl.Key] = [pscustomobject]@{ Kind = 'Sata'; BusNumber = $ctrl.BusNumber; Type = 'SATA' }
     }
 
-    $diskControllerBus = @{}
+    $controllerSpecs = @($scsiControllers | ForEach-Object {
+        [pscustomobject]@{ Kind = 'Scsi'; BusNumber = $_.ExtensionData.BusNumber; Type = $_.Type }
+    })
+    $controllerSpecs += @($sataControllers | ForEach-Object {
+        [pscustomobject]@{ Kind = 'Sata'; BusNumber = $_.BusNumber; Type = 'SATA' }
+    })
+
+    $diskControllerInfo = @{}
     foreach ($disk in $disks) {
-        $ctrl = $controllerByKey[$disk.ExtensionData.ControllerKey]
-        $diskControllerBus[$disk.Id] = $ctrl.ExtensionData.BusNumber
+        $diskControllerInfo[$disk.Id] = $controllerByKey[$disk.ExtensionData.ControllerKey]
     }
+
+    $sataUsedByDisk = @($disks | Where-Object { $diskControllerInfo[$_.Id].Kind -eq 'Sata' })
+    $usbControllerTypes = @($usbControllers | ForEach-Object { $_.GetType().Name } | Sort-Object -Unique)
 
     $specs = [ordered]@{
         Name                  = $vm.Name
@@ -203,14 +274,15 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
     Write-Host "`n--- Spécifications relevées sur $($vm.Name) ---" -ForegroundColor Cyan
     $specs.GetEnumerator() | ForEach-Object { Write-Host "$($_.Key) : $($_.Value)" }
 
-    Write-Host "Contrôleurs SCSI :"
+    Write-Host "Contrôleurs SCSI/SATA :"
     foreach ($ctrl in $controllerSpecs) {
-        Write-Host "  - Bus $($ctrl.BusNumber) : $($ctrl.Type)"
+        Write-Host "  - $($ctrl.Kind) bus $($ctrl.BusNumber) : $($ctrl.Type)"
     }
 
     Write-Host "Disques :"
     foreach ($disk in $disks) {
-        Write-Host "  - $($disk.Name) : $($disk.CapacityGB) Go, format $($disk.StorageFormat), bus SCSI $($diskControllerBus[$disk.Id])"
+        $info = $diskControllerInfo[$disk.Id]
+        Write-Host "  - $($disk.Name) : $($disk.CapacityGB) Go, format $($disk.StorageFormat), contrôleur $($info.Kind) bus $($info.BusNumber)"
     }
 
     Write-Host "Cartes réseau :"
@@ -225,13 +297,21 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
         Write-Host "  (aucun)"
     }
 
+    Write-Host "Contrôleur SATA : $(if ($sataControllers) { if ($sataUsedByDisk.Count -gt 0) { "présent, utilisé par $($sataUsedByDisk.Count) disque(s)" } else { "présent, non utilisé par un disque" } } else { 'absent' })"
+
+    Write-Host "Contrôleur USB : $(if ($usbControllerTypes) { "présent ($($usbControllerTypes -join ', ')), $(@($usbDevices).Count) périphérique(s) connecté(s)" } else { 'absent' })"
+    if (@($usbDevices).Count -gt 0) {
+        Write-Host "  ATTENTION : les périphériques USB passthrough ne peuvent pas être répliqués (liés au matériel physique de l'hôte source)." -ForegroundColor Yellow
+    }
+
     [pscustomobject]@{
-        Specs              = $specs
-        Disks              = $disks
-        Nics               = $nics
-        Controllers        = $controllerSpecs
-        DiskControllerBus  = $diskControllerBus
-        CDDriveCount       = @($cdDrives).Count
+        Specs               = $specs
+        Disks               = $disks
+        Nics                = $nics
+        Controllers         = $controllerSpecs
+        DiskControllerInfo  = $diskControllerInfo
+        CDDriveCount        = @($cdDrives).Count
+        UsbControllerTypes  = $usbControllerTypes
     }
 }
 
@@ -303,10 +383,11 @@ $plan = foreach ($entry in $vmSpecs) {
         Specs             = $entry.Specs
         Disks             = $entry.Disks
         Nics              = $entry.Nics
-        NetworkMap        = $networkMap
-        Controllers       = $entry.Controllers
-        DiskControllerBus = $entry.DiskControllerBus
-        CDDriveCount      = $entry.CDDriveCount
+        NetworkMap         = $networkMap
+        Controllers        = $entry.Controllers
+        DiskControllerInfo = $entry.DiskControllerInfo
+        CDDriveCount       = $entry.CDDriveCount
+        UsbControllerTypes = $entry.UsbControllerTypes
     }
 }
 
@@ -348,10 +429,13 @@ foreach ($item in $plan) {
         Get-HardDisk -VM $newVM | Remove-HardDisk -DeletePermanently:$true -Confirm:$false
         Get-NetworkAdapter -VM $newVM | Remove-NetworkAdapter -Confirm:$false
 
-        # Recréation des disques (vides, sans les données source), regroupés par bus
-        # SCSI source pour recréer le bon type de contrôleur. New-ScsiController n'a
-        # pas de paramètre -VM : il faut lui passer un disque existant, donc on ne
-        # traite que les bus réellement utilisés par au moins un disque.
+        # Recréation des disques (vides, sans les données source).
+        $scsiDisks = @($item.Disks | Where-Object { $item.DiskControllerInfo[$_.Id].Kind -eq 'Scsi' })
+        $sataDisks = @($item.Disks | Where-Object { $item.DiskControllerInfo[$_.Id].Kind -eq 'Sata' })
+
+        # Disques SCSI, regroupés par bus source pour recréer le bon type de
+        # contrôleur. New-ScsiController n'a pas de paramètre -VM : il faut lui passer
+        # un disque existant, donc on ne traite que les bus utilisés par un disque.
         $availableTargetControllers = @(Get-ScsiController -VM $newVM)
         $busControllerMap = @{}
 
@@ -359,14 +443,14 @@ foreach ($item in $plan) {
         # position en plus de celui par clé, ce qui provoque une erreur "index" dès que
         # la clé est un entier (le bus SCSI) ne correspondant à aucune position existante.
         $disksByBus = @{}
-        foreach ($disk in $item.Disks) {
-            $busNumber = $item.DiskControllerBus[$disk.Id]
+        foreach ($disk in $scsiDisks) {
+            $busNumber = $item.DiskControllerInfo[$disk.Id].BusNumber
             if (-not $disksByBus.Contains($busNumber)) { $disksByBus[$busNumber] = @() }
             $disksByBus[$busNumber] += $disk
         }
 
         foreach ($busNumber in ($disksByBus.Keys | Sort-Object)) {
-            $ctrlSpec  = $item.Controllers | Where-Object { $_.BusNumber -eq $busNumber } | Select-Object -First 1
+            $ctrlSpec  = $item.Controllers | Where-Object { $_.Kind -eq 'Scsi' -and $_.BusNumber -eq $busNumber } | Select-Object -First 1
             $isFirst   = $true
 
             foreach ($disk in $disksByBus[$busNumber]) {
@@ -399,6 +483,16 @@ foreach ($item in $plan) {
             }
         }
 
+        # Disques SATA : recréés directement via l'API Vim, car New-HardDisk -Controller
+        # n'accepte qu'un contrôleur SCSI typé PowerCLI, pas un contrôleur SATA.
+        if ($sataDisks.Count -gt 0) {
+            $sataController = Get-OrNewSataController -VM $newVM
+            foreach ($disk in $sataDisks) {
+                Write-Host "[$($item.TargetName)] Création du disque SATA $($disk.CapacityGB) Go (format $($disk.StorageFormat))..."
+                New-VimHardDisk -VM $newVM -ControllerKey $sataController.Key -CapacityGB $disk.CapacityGB -StorageFormat $disk.StorageFormat -Datastore $targetDatastore
+            }
+        }
+
         # Recréation des cartes réseau selon la correspondance établie plus haut
         foreach ($nic in $item.Nics) {
             $targetNetwork = $item.NetworkMap[$nic.Name]
@@ -412,29 +506,41 @@ foreach ($item in $plan) {
 
         # Recréation des lecteurs CD/DVD (sans média, la source n'est pas copiée).
         # Un lecteur CD a besoin d'un contrôleur IDE ou SATA ; New-VM n'en crée pas
-        # forcément un par défaut selon le GuestId/la version matérielle, donc on
-        # ajoute un contrôleur SATA via l'API Vim si aucun des deux n'est présent.
+        # forcément un par défaut selon le GuestId/la version matérielle.
         if ($item.CDDriveCount -gt 0) {
             $hasIdeOrSata = $newVM.ExtensionData.Config.Hardware.Device | Where-Object {
                 $_ -is [VMware.Vim.VirtualIDEController] -or $_ -is [VMware.Vim.VirtualAHCIController]
             }
             if (-not $hasIdeOrSata) {
                 Write-Host "[$($item.TargetName)] Ajout d'un contrôleur SATA (requis pour le lecteur CD/DVD)..."
-                $sataDeviceSpec = New-Object VMware.Vim.VirtualDeviceConfigSpec
-                $sataDeviceSpec.Operation = [VMware.Vim.VirtualDeviceConfigSpecOperation]::add
-                $sataController = New-Object VMware.Vim.VirtualAHCIController
-                $sataController.Key       = -1
-                $sataController.BusNumber = 0
-                $sataDeviceSpec.Device    = $sataController
-
-                $sataConfigSpec = New-Object VMware.Vim.VirtualMachineConfigSpec
-                $sataConfigSpec.DeviceChange = @($sataDeviceSpec)
-                $newVM.ExtensionData.ReconfigVM($sataConfigSpec)
+                Get-OrNewSataController -VM $newVM | Out-Null
             }
 
             for ($i = 0; $i -lt $item.CDDriveCount; $i++) {
                 Write-Host "[$($item.TargetName)] Création du lecteur CD/DVD $($i + 1)..."
                 New-CDDrive -VM $newVM -StartConnected:$false -Confirm:$false | Out-Null
+            }
+        }
+
+        # Réplique le(s) contrôleur(s) USB présent(s) sur la source si absent(s) sur la
+        # cible (les périphériques USB passthrough eux-mêmes ne sont pas reproductibles,
+        # ils sont liés au matériel physique de l'hôte source).
+        if ($item.UsbControllerTypes) {
+            $existingUsbTypes = @($newVM.ExtensionData.Config.Hardware.Device | Where-Object {
+                $_ -is [VMware.Vim.VirtualUSBController] -or $_ -is [VMware.Vim.VirtualUSBXHCIController]
+            } | ForEach-Object { $_.GetType().Name })
+
+            foreach ($typeName in ($item.UsbControllerTypes | Where-Object { $existingUsbTypes -notcontains $_ })) {
+                Write-Host "[$($item.TargetName)] Ajout d'un contrôleur USB ($typeName)..."
+                $usbDeviceSpec = New-Object VMware.Vim.VirtualDeviceConfigSpec
+                $usbDeviceSpec.Operation = [VMware.Vim.VirtualDeviceConfigSpecOperation]::add
+                $usbController = New-Object "VMware.Vim.$typeName"
+                $usbController.Key      = -1
+                $usbDeviceSpec.Device    = $usbController
+
+                $usbConfigSpec = New-Object VMware.Vim.VirtualMachineConfigSpec
+                $usbConfigSpec.DeviceChange = @($usbDeviceSpec)
+                $newVM.ExtensionData.ReconfigVM($usbConfigSpec)
             }
         }
 
