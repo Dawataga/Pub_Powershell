@@ -188,15 +188,27 @@ $vmSpecs = foreach ($vm in $selectedVMs) {
         $diskControllerBus[$disk.Id] = $ctrl.ExtensionData.BusNumber
     }
 
+    $resourceConfig = Get-VMResourceConfiguration -VM $vm
+
     $specs = [ordered]@{
-        Name           = $vm.Name
-        NumCpu         = $vm.NumCpu
-        CoresPerSocket = $vm.CoresPerSocket
-        MemoryGB       = $vm.MemoryGB
-        GuestId        = $vm.ExtensionData.Config.GuestId
-        HWVersion      = $vm.HardwareVersion
-        Firmware       = $vm.ExtensionData.Config.Firmware
-        Notes          = $vm.Notes
+        Name                  = $vm.Name
+        NumCpu                = $vm.NumCpu
+        CoresPerSocket        = $vm.CoresPerSocket
+        MemoryGB              = $vm.MemoryGB
+        GuestId               = $vm.ExtensionData.Config.GuestId
+        HWVersion             = $vm.HardwareVersion
+        Firmware              = $vm.ExtensionData.Config.Firmware
+        Notes                 = $vm.Notes
+        CpuHotAddEnabled      = $vm.ExtensionData.Config.CpuHotAddEnabled
+        MemoryHotAddEnabled   = $vm.ExtensionData.Config.MemoryHotAddEnabled
+        CpuReservationMhz     = $resourceConfig.CpuReservationMhz
+        CpuLimitMhz           = $resourceConfig.CpuLimitMhz
+        CpuSharesLevel        = $resourceConfig.CpuSharesLevel
+        NumCpuShares          = $resourceConfig.NumCpuShares
+        MemReservationMB      = $resourceConfig.MemReservationMB
+        MemLimitMB            = $resourceConfig.MemLimitMB
+        MemSharesLevel        = $resourceConfig.MemSharesLevel
+        NumMemShares          = $resourceConfig.NumMemShares
     }
 
     Write-Host "`n--- Spécifications relevées sur $($vm.Name) ---" -ForegroundColor Cyan
@@ -342,10 +354,28 @@ foreach ($item in $plan) {
         }
         $newVM = New-VM @newVMParams -ErrorAction Stop
 
-        # Le firmware (BIOS/EFI) n'est pas exposé par New-VM : reconfiguration via l'API Vim
+        # Le firmware (BIOS/EFI) et le hot-add CPU/RAM ne sont pas exposés par New-VM :
+        # reconfiguration via l'API Vim.
         $configSpec = New-Object VMware.Vim.VirtualMachineConfigSpec
-        $configSpec.Firmware = $item.Specs.Firmware
+        $configSpec.Firmware            = $item.Specs.Firmware
+        $configSpec.CpuHotAddEnabled    = $item.Specs.CpuHotAddEnabled
+        $configSpec.MemoryHotAddEnabled = $item.Specs.MemoryHotAddEnabled
         $newVM.ExtensionData.ReconfigVM($configSpec)
+
+        # Réservations / limites / shares CPU et mémoire
+        $resourceParams = @{
+            VM             = $newVM
+            CpuReservationMhz = $item.Specs.CpuReservationMhz
+            CpuLimitMhz       = $item.Specs.CpuLimitMhz
+            CpuSharesLevel    = $item.Specs.CpuSharesLevel
+            MemReservationMB  = $item.Specs.MemReservationMB
+            MemLimitMB        = $item.Specs.MemLimitMB
+            MemSharesLevel    = $item.Specs.MemSharesLevel
+            Confirm           = $false
+        }
+        if ($item.Specs.CpuSharesLevel -eq 'Custom') { $resourceParams.NumCpuShares = $item.Specs.NumCpuShares }
+        if ($item.Specs.MemSharesLevel -eq 'Custom') { $resourceParams.NumMemShares = $item.Specs.NumMemShares }
+        Set-VMResourceConfiguration @resourceParams | Out-Null
 
         # New-VM ajoute un disque, un contrôleur SCSI et une carte réseau par défaut
         # (dimensionnés/typés selon le GuestId) même sans -DiskGB/-NetworkName :
