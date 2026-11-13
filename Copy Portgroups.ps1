@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Copie des Port Groups d'un vSwitch source vers un vSwitch cible entre deux hôtes ESXi.
 
@@ -8,17 +8,20 @@
     vSwitch cible (existant ou nouveau) en préservant les VLAN IDs et les politiques de sécurité.
 
 .NOTES
-    Prérequis : Module VMware.PowerCLI ou VCF.PowerCLI installé.
+    Prérequis : Module VCF.PowerCLI (anciennement VMware.PowerCLI) installé.
 #>
 
 # ============================================================
 # PRÉREQUIS
 # ============================================================
 
-# Vérifie la présence du module PowerCLI (deux noms possibles selon la version)
-$powerCLIModule = Get-Module -ListAvailable -Name "VMware.PowerCLI", "VCF.PowerCLI" | Select-Object -First 1
-if (-not $powerCLIModule) {
-    Write-Host "Le module VMware PowerCLI n'est pas installé. Installez-le avec : Install-Module VMware.PowerCLI" -ForegroundColor Red
+# Vérifie la présence du module PowerCLI : VCF.PowerCLI (9.0+) en priorité, VMware.PowerCLI (déprécié) en repli
+if (Get-Module -ListAvailable -Name "VCF.PowerCLI") {
+    # OK
+} elseif (Get-Module -ListAvailable -Name "VMware.PowerCLI") {
+    Write-Host "VMware.PowerCLI est déprécié. Migrez vers VCF.PowerCLI : Uninstall-Module VMware.PowerCLI -AllVersions ; Install-Module VCF.PowerCLI" -ForegroundColor Yellow
+} else {
+    Write-Host "Le module VCF PowerCLI n'est pas installé. Installez-le avec : Install-Module VCF.PowerCLI -Scope CurrentUser" -ForegroundColor Red
     exit
 }
 
