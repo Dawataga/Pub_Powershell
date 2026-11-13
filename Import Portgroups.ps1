@@ -5,7 +5,8 @@
 .DESCRIPTION
     Ce script interactif lit un fichier généré par "Export Portgroups.ps1", permet de
     sélectionner les vSwitch à importer, puis, pour chacun, de choisir le vSwitch cible
-    sur l'hôte ESXi (existant, ou créé à l'identique avec le même nom et MTU). Les Port
+    sur l'hôte ESXi (existant, ou créé à l'identique avec le même nom et MTU), ou de
+    regrouper tous les Port Groups sélectionnés sur un seul vSwitch cible. Les Port
     Groups sont recréés en préservant les VLAN IDs et les politiques de sécurité.
     Les fichiers de l'ancien format (un seul vSwitch) sont également acceptés.
 
@@ -158,9 +159,56 @@ for ($i = 0; $i -lt $targetVSwitches.Count; $i++) {
     Write-Host "$($i+1). $($targetVSwitches[$i].Name)"
 }
 
-# Plan d'import : pour chaque vSwitch du fichier, le nom du vSwitch cible et s'il faut le créer
+# Plan d'import : pour chaque vSwitch du fichier, le nom du vSwitch cible, s'il faut le créer et avec quel MTU
 $plan = @()
-foreach ($vs in $selectedVSwitches) {
+
+# Mode de regroupement : tous les Port Groups sélectionnés vers un seul vSwitch cible
+$singleTarget = $false
+if ($selectedVSwitches.Count -gt 1) {
+    $singleTarget = (Read-Host "Importer tous les groupes de ports vers un seul vSwitch ? (O/N)") -match '^[Oo]$'
+}
+
+if ($singleTarget) {
+    # MTU le plus élevé parmi les sources pour ne pénaliser aucun Port Group
+    $maxMtu = ($selectedVSwitches | Measure-Object -Property Mtu -Maximum).Maximum
+
+    $targetName = $null
+    while (-not $targetName) {
+        $choice = (Read-Host "vSwitch cible unique : numéro d'un vSwitch existant, ou nom d'un nouveau vSwitch à créer").Trim()
+        if ($choice -match '^\d+$') {
+            if ([int]$choice -ge 1 -and [int]$choice -le $targetVSwitches.Count) {
+                $targetName = $targetVSwitches[[int]$choice - 1].Name
+            } else {
+                Write-Host "Numéro hors limites." -ForegroundColor Yellow
+            }
+        } elseif ($choice -ne '') {
+            $targetName = $choice
+        } else {
+            Write-Host "Invalide." -ForegroundColor Yellow
+        }
+    }
+
+    $exists = [bool]($targetVSwitches | Where-Object { $_.Name -eq $targetName })
+    if ($exists) {
+        $existingMtu = ($targetVSwitches | Where-Object { $_.Name -eq $targetName }).Mtu
+        if ($existingMtu -lt $maxMtu) {
+            Write-Host "Attention : le vSwitch '$targetName' a un MTU de $existingMtu, inférieur au MTU source maximal ($maxMtu)." -ForegroundColor Yellow
+        }
+    }
+
+    $first = $true
+    foreach ($vs in $selectedVSwitches) {
+        $plan += [pscustomobject]@{
+            Source     = $vs
+            TargetName = $targetName
+            Create     = (-not $exists -and $first)
+            Mtu        = $maxMtu
+        }
+        $first = $false
+    }
+}
+
+foreach ($vs in $(if ($singleTarget) { @() } else { $selectedVSwitches })) {
     $targetName = $null
     while (-not $targetName) {
         $choice = (Read-Host "Cible pour '$($vs.Name)' : Entrée/0 = même nom (créé si absent), ou numéro d'un vSwitch existant").Trim()
@@ -180,6 +228,7 @@ foreach ($vs in $selectedVSwitches) {
         Source     = $vs
         TargetName = $targetName
         Create     = (-not $exists -and -not $alreadyPlanned)
+        Mtu        = $vs.Mtu
     }
 }
 
@@ -189,7 +238,7 @@ foreach ($vs in $selectedVSwitches) {
 
 Write-Host "`nRésumé de l'import sur $($targetInfo.IP) :" -ForegroundColor Cyan
 foreach ($p in $plan) {
-    $action = if ($p.Create) { "création (MTU $($p.Source.Mtu))" } else { "existant" }
+    $action = if ($p.Create) { "création (MTU $($p.Mtu))" } else { "existant" }
     Write-Host " - $($p.Source.Name) -> $($p.TargetName) [$action] : $(@($p.Source.PortGroups).Count) groupe(s) de ports"
 }
 $confirmation = Read-Host "Confirmer l'opération ? (O/N)"
@@ -203,8 +252,8 @@ foreach ($p in $plan) {
     try {
         if ($p.Create) {
             Write-Host "Création du vSwitch '$($p.TargetName)'..." -ForegroundColor Green
-            # MTU repris de l'export pour garantir la cohérence réseau
-            $targetSwitch = New-VirtualSwitch -VMHost $targetInfo.IP -Name $p.TargetName -Mtu $p.Source.Mtu -ErrorAction Stop
+            # MTU repris de l'export (le plus élevé des sources en mode vSwitch unique)
+            $targetSwitch = New-VirtualSwitch -VMHost $targetInfo.IP -Name $p.TargetName -Mtu $p.Mtu -ErrorAction Stop
         } else {
             $targetSwitch = Get-VirtualSwitch -VMHost $targetInfo.IP -Name $p.TargetName -Standard -ErrorAction Stop
         }
